@@ -118,6 +118,216 @@ var Counter = (function () {
     return out;
   }
 
+  /**
+   * Tìm vùng nền trắng của light pad: vùng "trắng" (kênh màu nhỏ nhất cao — khung đỏ có kênh
+   * xanh lá/xanh dương thấp nên bị loại) lớn nhất, lấy bao lồi để vật nằm sát mép vẫn ở trong,
+   * rồi co vào một chút để bỏ dải viền chuyển màu. Trả về null nếu không thấy.
+   */
+  function findPad(rgba, w, h) {
+    var n = w * h, mn = new Uint8Array(n), hist = new Float64Array(256), i, x, y;
+    for (i = 0; i < n; i++) {
+      var j = i * 4, a = rgba[j], b = rgba[j + 1], c = rgba[j + 2];
+      var v = a < b ? (a < c ? a : c) : (b < c ? b : c);
+      mn[i] = v; hist[v]++;
+    }
+    var t = otsu(hist, n);
+    // Nền trắng phải thực sự sáng và khác biệt rõ với phần còn lại.
+    var sumHi = 0, cntHi = 0, sumLo = 0, cntLo = 0;
+    for (i = 0; i < 256; i++) { if (i > t) { sumHi += i * hist[i]; cntHi += hist[i]; } else { sumLo += i * hist[i]; cntLo += hist[i]; } }
+    if (!cntHi || !cntLo || sumHi / cntHi < 110 || sumHi / cntHi - sumLo / cntLo < 40) return null;
+    var bright = new Uint8Array(n);
+    for (i = 0; i < n; i++) bright[i] = mn[i] > t ? 1 : 0;
+    return regionFromBinary(bright, w, h, 0.04);
+  }
+
+  // ---------- Phân loại vật ----------
+  function rng(seed) { var s = seed >>> 0; return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+  function dist2(a, b) { var s = 0; for (var i = 0; i < a.length; i++) { var d = a[i] - b[i]; s += d * d; } return s; }
+
+  function kmeans(X, k, seed) {
+    var R = rng(seed), N = X.length, D = X[0].length, cent = [], i, j, it;
+    cent.push(X[Math.floor(R() * N)].slice());
+    while (cent.length < k) { // k-means++
+      var dsum = 0, dd = X.map(function (x) { var m = Infinity; cent.forEach(function (c) { var v = dist2(x, c); if (v < m) m = v; }); dsum += m; return m; });
+      var t = R() * dsum, pick = 0;
+      for (i = 0; i < N; i++) { t -= dd[i]; if (t <= 0) { pick = i; break; } }
+      cent.push(X[pick].slice());
+    }
+    var as = new Int32Array(N);
+    for (it = 0; it < 40; it++) {
+      var changed = false;
+      for (i = 0; i < N; i++) {
+        var best = 0, bd = Infinity;
+        for (j = 0; j < k; j++) { var v2 = dist2(X[i], cent[j]); if (v2 < bd) { bd = v2; best = j; } }
+        if (as[i] !== best || it === 0) { changed = changed || as[i] !== best; as[i] = best; }
+      }
+      var sums = [], cnt = new Int32Array(k);
+      for (j = 0; j < k; j++) sums.push(new Float64Array(D));
+      for (i = 0; i < N; i++) { cnt[as[i]]++; for (var d = 0; d < D; d++) sums[as[i]][d] += X[i][d]; }
+      for (j = 0; j < k; j++) if (cnt[j]) for (d = 0; d < D; d++) cent[j][d] = sums[j][d] / cnt[j];
+      if (!changed && it > 0) break;
+    }
+    var inertia = 0;
+    for (i = 0; i < N; i++) inertia += dist2(X[i], cent[as[i]]);
+    return { as: as, cent: cent, inertia: inertia };
+  }
+
+  function bestKmeans(X, k) {
+    var best = null;
+    for (var s = 1; s <= 4; s++) { var r = kmeans(X, k, s * 7919); if (!best || r.inertia < best.inertia) best = r; }
+    return best;
+  }
+
+  function silhouette(X, as, k) {
+    var N = X.length, tot = 0, i, j;
+    for (i = 0; i < N; i++) {
+      var sum = new Float64Array(k), cnt = new Int32Array(k);
+      for (j = 0; j < N; j++) { if (i === j) continue; sum[as[j]] += Math.sqrt(dist2(X[i], X[j])); cnt[as[j]]++; }
+      var a = cnt[as[i]] ? sum[as[i]] / cnt[as[i]] : 0, b = Infinity;
+      for (j = 0; j < k; j++) if (j !== as[i] && cnt[j]) b = Math.min(b, sum[j] / cnt[j]);
+      if (!cnt[as[i]] || b === Infinity) continue;
+      tot += (b - a) / Math.max(a, b);
+    }
+    return tot / N;
+  }
+
+  function colorName(rgb) {
+    var r = rgb[0] / 255, g = rgb[1] / 255, b = rgb[2] / 255;
+    var mx = Math.max(r, g, b), mn = Math.min(r, g, b), v = mx, s = mx ? (mx - mn) / mx : 0, hh = 0;
+    if (v < 0.22) return 'đen';
+    if (s < 0.2) return v > 0.78 ? 'trắng' : 'xám/bạc';
+    if (mx === r) hh = 60 * (((g - b) / (mx - mn)) % 6); else if (mx === g) hh = 60 * ((b - r) / (mx - mn) + 2); else hh = 60 * ((r - g) / (mx - mn) + 4);
+    if (hh < 0) hh += 360;
+    if (hh < 15 || hh >= 345) return 'đỏ';
+    if (hh < 40) return 'cam';
+    if (hh < 70) return 'vàng';
+    if (hh < 165) return 'xanh lá';
+    if (hh < 255) return 'xanh dương';
+    if (hh < 290) return 'tím';
+    return 'hồng';
+  }
+
+  /**
+   * Gom vật thành các loại theo: kích thước, độ thuôn dài, độ góc cạnh, màu (khi đếm trên nền màu).
+   * k = 0 → tự chọn số loại (1–6) theo hệ số silhouette.
+   */
+  function classify(rgba, lab, keep, comps, markers, w, k, colorMode) {
+    var C = comps.length, i, j, n = lab.length;
+    if (!C) return [];
+    var N = new Float64Array(C), SX = new Float64Array(C), SY = new Float64Array(C), SXX = new Float64Array(C),
+      SYY = new Float64Array(C), SXY = new Float64Array(C), SR = new Float64Array(C), SG = new Float64Array(C), SB = new Float64Array(C);
+    // Cụm dính nhiều vật: chia điểm ảnh của cụm cho tâm vật gần nhất → mỗi vật có cỡ & màu riêng.
+    var M = markers.length, MA = new Float64Array(M), MR = new Float64Array(M), MG = new Float64Array(M), MB = new Float64Array(M);
+    var cm = [];
+    markers.forEach(function (m, mi) { if (comps[m.c].n > 1 && !comps[m.c].huge) (cm[m.c] = cm[m.c] || []).push(mi); });
+    for (i = 0; i < n; i++) {
+      var kk = keep[lab[i]]; if (!kk) continue;
+      var c = kk - 1, y = (i / w) | 0, x = i - y * w, q = i * 4;
+      N[c]++; SX[c] += x; SY[c] += y; SXX[c] += x * x; SYY[c] += y * y; SXY[c] += x * y;
+      SR[c] += rgba[q]; SG[c] += rgba[q + 1]; SB[c] += rgba[q + 2];
+      var lst = cm[c];
+      if (lst) {
+        var bm = lst[0], bdm = Infinity;
+        for (var t1 = 0; t1 < lst.length; t1++) {
+          var mk = markers[lst[t1]], ex = mk.x - x, ey = mk.y - y, dm = ex * ex + ey * ey;
+          if (dm < bdm) { bdm = dm; bm = lst[t1]; }
+        }
+        MA[bm]++; MR[bm] += rgba[q]; MG[bm] += rgba[q + 1]; MB[bm] += rgba[q + 2];
+      }
+    }
+    var cw = colorMode ? 3 : 0.6;
+    var info = comps.map(function (cp, ci) {
+      var a = N[ci] || 1, mx = SX[ci] / a, my = SY[ci] / a;
+      var cxx = SXX[ci] / a - mx * mx + 1 / 12, cyy = SYY[ci] / a - my * my + 1 / 12, cxy = SXY[ci] / a - mx * my;
+      var tr = cxx + cyy, det = Math.max(1e-6, cxx * cyy - cxy * cxy), disc = Math.sqrt(Math.max(0, tr * tr / 4 - det));
+      var l1 = tr / 2 + disc, l2 = Math.max(1e-6, tr / 2 - disc);
+      var per = a / (cp.n || 1);
+      return {
+        area: per, elong: Math.sqrt(l1 / l2), fill: cp.n > 1 ? 1 : a / (4 * Math.PI * Math.sqrt(det)),
+        rgb: [SR[ci] / a, SG[ci] / a, SB[ci] / a], single: (cp.n || 1) === 1 && !cp.huge
+      };
+    });
+    function vec(f, useShape, ref) {
+      return [2.5 * Math.log(f.area), useShape ? 2.0 * Math.log(f.elong) : ref[1], useShape ? 4.0 * Math.min(1.2, f.fill) : ref[2],
+        cw * f.rgb[0] / 255, cw * f.rgb[1] / 255, cw * f.rgb[2] / 255];
+    }
+    var idxS = [], X = [];
+    info.forEach(function (f, ci) { if (f.single) { idxS.push(ci); X.push(vec(f, true)); } });
+    if (X.length > 400) { // giới hạn để chạy nhanh khi đếm trực tiếp
+      var stepS = X.length / 400, X2 = [], I2 = [];
+      for (i = 0; i < 400; i++) { var p = Math.floor(i * stepS); X2.push(X[p]); I2.push(idxS[p]); }
+      X = X2; idxS = I2;
+    }
+    var K = 1, model = null;
+    if (X.length >= 2) {
+      var maxK = Math.min(6, Math.floor(X.length / 2));
+      if (k >= 2) { K = Math.min(k, X.length); model = bestKmeans(X, K); }
+      else if (X.length >= 6) {
+        var bestSil = -1;
+        for (var kk2 = 2; kk2 <= maxK; kk2++) {
+          var mdl = bestKmeans(X, kk2), sil = silhouette(X, mdl.as, kk2);
+          if (sil > bestSil) { bestSil = sil; model = mdl; K = kk2; }
+        }
+        if (bestSil < 0.55) { K = 1; model = null; }
+      }
+    }
+    var cent = model ? model.cent : [X.length ? X[0].map(function (_, d) { return X.reduce(function (s, v) { return s + v[d]; }, 0) / X.length; }) : [0, 0, 4, 0, 0, 0]];
+    // Xếp loại theo kích thước tăng dần → thứ tự ổn định giữa các lần đếm.
+    var order = cent.map(function (c2, j2) { return j2; }).sort(function (a2, b2) { return cent[a2][0] - cent[b2][0]; });
+    var rank = new Int32Array(order.length);
+    order.forEach(function (o, r2) { rank[o] = r2; });
+    function nearest(v) {
+      var best = 0, bd = Infinity;
+      for (var j3 = 0; j3 < cent.length; j3++) { var dd = dist2(v, cent[j3]); if (dd < bd) { bd = dd; best = j3; } }
+      return best;
+    }
+    var compType = new Int32Array(C);
+    info.forEach(function (f, ci) {
+      var j4 = 0;
+      if (cent.length > 1 && f.single) j4 = nearest(vec(f, true));
+      if (cent.length > 1 && !f.single) { // cụm dính / vùng lớn: so khớp chỉ theo cỡ (mỗi vật) + màu
+        var v = vec(f, false, [0, 0, 0]), best = 0, bd = Infinity;
+        for (var j5 = 0; j5 < cent.length; j5++) {
+          var dd2 = 0; for (var d2 = 0; d2 < 6; d2++) { if (d2 === 1 || d2 === 2) continue; var e = v[d2] - cent[j5][d2]; dd2 += e * e; }
+          if (dd2 < bd) { bd = dd2; best = j5; }
+        }
+        j4 = best;
+      }
+      compType[ci] = rank[j4];
+      comps[ci].t = rank[j4];
+    });
+    var types = [];
+    for (j = 0; j < cent.length; j++) types.push({ count: 0, area: 0, elong: 0, fill: 0, rgb: [0, 0, 0], ns: 0 });
+    markers.forEach(function (m, mi) {
+      m.t = compType[m.c];
+      if (cent.length > 1 && cm[m.c] && MA[mi] > 0) { // vật trong cụm dính: phân loại riêng theo phần diện tích của nó
+        var a = MA[mi], v = vec({ area: a, elong: 1, fill: 1, rgb: [MR[mi] / a, MG[mi] / a, MB[mi] / a] }, false, [0, 0, 0]);
+        var best = 0, bd = Infinity;
+        for (var j6 = 0; j6 < cent.length; j6++) {
+          var dd3 = 0; for (var d3 = 0; d3 < 6; d3++) { if (d3 === 1 || d3 === 2) continue; var e3 = v[d3] - cent[j6][d3]; dd3 += e3 * e3; }
+          if (dd3 < bd) { bd = dd3; best = j6; }
+        }
+        m.t = rank[best];
+      }
+      types[m.t].count += m.w || 1;
+    });
+    info.forEach(function (f, ci) {
+      if (!f.single) return;
+      var T = types[compType[ci]];
+      T.ns++; T.area += f.area; T.elong += f.elong; T.fill += Math.min(1.2, f.fill);
+      T.rgb[0] += f.rgb[0]; T.rgb[1] += f.rgb[1]; T.rgb[2] += f.rgb[2];
+    });
+    return types.map(function (T, ti) {
+      var m2 = Math.max(1, T.ns), area = T.area / m2, elong = T.elong / m2, fill = T.fill / m2;
+      var rgb = [T.rgb[0] / m2, T.rgb[1] / m2, T.rgb[2] / m2];
+      return {
+        id: ti, count: T.count, diam: 2 * Math.sqrt(area / Math.PI), elong: elong, fill: fill, rgb: rgb,
+        shape: elong > 1.6 ? 'thuôn dài' : fill < 0.86 ? 'góc cạnh' : 'tròn',
+        color: colorMode ? colorName(rgb) : ''
+      };
+    });
+  }
+
   // Co / giãn hình chữ thập 3x3 trên ảnh nhị phân.
   function erode(src, w, h) {
     var d = new Uint8Array(w * h);
@@ -296,73 +506,213 @@ var Counter = (function () {
     return marks;
   }
 
+  var COLOR_MODES = { black: 1, red: 1, green: 1, blue: 1 };
+
   /**
-   * opts:
-   *  polarity: 'auto' | 'dark' (vật tối trên nền sáng) | 'light' (vật sáng trên nền tối)
-   *  sensitivity: -50..50 (dương = nhạy hơn, bắt vật mờ)
-   *  minArea: px, 0 = tự động
-   *  fillHoles: true/false (đá trong suốt cho viền + lõi sáng)
-   *  split: 'auto' | 'shape' | 'area' | 'off'
-   *  denoise: true/false
+   * Tìm tấm nền màu (đen/đỏ/xanh lá/xanh dương): điểm có màu trội của nền, vùng lớn nhất,
+   * lấy bao lồi rồi co mép. Trả về null nếu không thấy.
    */
-  function detect(rgba, w, h, opts) {
-    opts = opts || {};
-    var t0 = Date.now(), n = w * h, i;
-    var gray = toGray(rgba, n);
-
-    // 1) Nền thô = mặt cong đa thức khớp trên toàn ảnh (vật chỉ là thiểu số điểm ảnh).
-    var r = Math.max(8, Math.round(Math.max(w, h) / 12));
-    var ones = new Uint8Array(n); ones.fill(1);
-    var bg0 = polyFit(gray, null, w, h) || maskedMean(gray, ones, w, h, r);
-    var dev = new Int16Array(n), ah = new Float64Array(256);
+  function findBoard(rgba, w, h, color) {
+    var n = w * h, score = new Uint8Array(n), hist = new Float64Array(256), i;
+    var ci = color === 'red' ? 0 : color === 'green' ? 1 : 2;
     for (i = 0; i < n; i++) {
-      var dd0 = Math.round(gray[i] - bg0[i]);
-      dev[i] = dd0; ah[dd0 < 0 ? -dd0 : dd0]++;
+      var j = i * 4, R = rgba[j], G = rgba[j + 1], B = rgba[j + 2], v;
+      if (color === 'black') {
+        var mx = R > G ? (R > B ? R : B) : (G > B ? G : B);
+        v = 255 - mx;                                  // càng tối càng giống nền đen
+      } else {
+        var c = rgba[j + ci], o1 = rgba[j + (ci + 1) % 3], o2 = rgba[j + (ci + 2) % 3];
+        v = c - (o1 > o2 ? o1 : o2);                    // độ trội của kênh màu nền
+        v = v < 0 ? 0 : v;
+      }
+      score[i] = v; hist[v]++;
     }
-    var acc0 = 0, madAbs = 0;
-    for (i = 0; i < 256; i++) { acc0 += ah[i]; if (acc0 >= n / 2) { madAbs = i; break; } }
-    var T0 = Math.max(6, 4 * madAbs), darkOut = 0, lightOut = 0;
-    for (i = 0; i < n; i++) { if (dev[i] < -T0) darkOut++; else if (dev[i] > T0) lightOut++; }
+    var t = otsu(hist, n);
+    var hiSum = 0, hiCnt = 0;
+    for (i = t + 1; i < 256; i++) { hiSum += i * hist[i]; hiCnt += hist[i]; }
+    if (!hiCnt || hiSum / hiCnt < (color === 'black' ? 150 : 45)) return null;
+    var bin = new Uint8Array(n);
+    for (i = 0; i < n; i++) bin[i] = score[i] > t ? 1 : 0;
+    return regionFromBinary(bin, w, h, 0.04);
+  }
 
-    // 2) Chiều của vật: phía nào có nhiều điểm lệch mạnh hơn.
+  // Vùng lớn nhất của ảnh nhị phân → bao lồi → mặt nạ đã co mép. Dùng chung cho light pad và nền màu.
+  function regionFromBinary(bin, w, h, minFrac) {
+    var n = w * h, x, y, k;
+    var L = label(bin, w, h, 1, true), best = null;
+    L.comps.forEach(function (cp) { if (!best || cp.area > best.area) best = cp; });
+    if (!best || best.area < minFrac * n) return null;
+    var pts = [];
+    for (y = best.y0; y <= best.y1; y++) {
+      var lo = -1, hi = -1, row = y * w;
+      for (x = best.x0; x <= best.x1; x++) if (L.lab[row + x] === best.id) { if (lo < 0) lo = x; hi = x; }
+      if (lo >= 0) { pts.push([lo, y]); if (hi !== lo) pts.push([hi, y]); }
+    }
+    pts.sort(function (p, q) { return p[0] - q[0] || p[1] - q[1]; });
+    var cross = function (o, a2, b2) { return (a2[0] - o[0]) * (b2[1] - o[1]) - (a2[1] - o[1]) * (b2[0] - o[0]); };
+    var lower = [], upper = [];
+    for (k = 0; k < pts.length; k++) {
+      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], pts[k]) <= 0) lower.pop();
+      lower.push(pts[k]);
+    }
+    for (k = pts.length - 1; k >= 0; k--) {
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pts[k]) <= 0) upper.pop();
+      upper.push(pts[k]);
+    }
+    lower.pop(); upper.pop();
+    var hull = lower.concat(upper);
+    if (hull.length < 3) return null;
+    var mask = new Uint8Array(n), m = hull.length;
+    for (y = 0; y < h; y++) {
+      var yc = y + 0.5, xl = Infinity, xr = -Infinity;
+      for (k = 0; k < m; k++) {
+        var p1 = hull[k], p2 = hull[(k + 1) % m];
+        if ((p1[1] <= yc && p2[1] > yc) || (p2[1] <= yc && p1[1] > yc)) {
+          var xi = p1[0] + (yc - p1[1]) / (p2[1] - p1[1]) * (p2[0] - p1[0]);
+          if (xi < xl) xl = xi; if (xi > xr) xr = xi;
+        }
+      }
+      if (xl > xr) continue;
+      var a0 = Math.max(0, Math.ceil(xl)), a1 = Math.min(w - 1, Math.floor(xr));
+      for (x = a0; x <= a1; x++) mask[y * w + x] = 1;
+    }
+    var shrink = Math.max(3, Math.round(Math.min(w, h) * 0.012));
+    for (k = 0; k < shrink; k++) mask = erode(mask, w, h);
+    return { mask: mask, hull: hull };
+  }
+
+  // Nền ước lượng = mặt cong đa thức trên điểm nền + hiệu chỉnh cục bộ phần dư.
+  function estimateBg(ch, bgMask, w, h, r) {
+    var n = w * h, P = polyFit(ch, bgMask, w, h), i;
+    if (!P) return maskedMean(ch, bgMask, w, h, r);
+    var resid = new Float32Array(n);
+    for (i = 0; i < n; i++) resid[i] = ch[i] - P[i];
+    var corr = maskedMean(resid, bgMask, w, h, r), bg = new Float32Array(n);
+    for (i = 0; i < n; i++) bg[i] = P[i] + corr[i];
+    return bg;
+  }
+
+  function madOf(vals, mask, n, nm) {
+    var ah = new Float64Array(256), i, acc = 0;
+    for (i = 0; i < n; i++) if (!mask || mask[i]) ah[vals[i]]++;
+    for (i = 0; i < 256; i++) { acc += ah[i]; if (acc >= nm / 2) return i; }
+    return 0;
+  }
+
+  // Độ chênh theo độ sáng (light pad / không nền): trả về diff 0..255 và chiều sáng-tối của vật.
+  function grayDiff(rgba, w, h, mask, nm, r, opts) {
+    var n = w * h, i, gray = toGray(rgba, n), ones = new Uint8Array(n); ones.fill(1);
+    var bg0 = polyFit(gray, mask, w, h) || maskedMean(gray, mask || ones, w, h, r);
+    var dev = new Int16Array(n), ad = new Uint8Array(n);
+    for (i = 0; i < n; i++) {
+      var d = Math.round(gray[i] - bg0[i]);
+      d = d < -255 ? -255 : d > 255 ? 255 : d;
+      dev[i] = d; ad[i] = d < 0 ? -d : d;
+    }
+    var T0 = Math.max(6, 4 * madOf(ad, mask, n, nm)), darkOut = 0, lightOut = 0;
+    for (i = 0; i < n; i++) {
+      if (mask && !mask[i]) continue;
+      if (dev[i] < -T0) darkOut++; else if (dev[i] > T0) lightOut++;
+    }
     var polarity = opts.polarity === 'dark' || opts.polarity === 'light' ? opts.polarity
       : (darkOut >= lightOut ? 'dark' : 'light');
     var dark = polarity === 'dark';
-
-    // 3) Nền tinh = trung bình cục bộ chỉ trên điểm nền (bỏ vật + viền) → không bị vật kéo lệch.
     var obj0 = new Uint8Array(n);
     for (i = 0; i < n; i++) obj0[i] = dark ? (dev[i] < -T0 ? 1 : 0) : (dev[i] > T0 ? 1 : 0);
     obj0 = dilate(obj0, w, h);
     var bgMask = new Uint8Array(n);
-    for (i = 0; i < n; i++) bgMask[i] = obj0[i] ? 0 : 1;
-    // Nền = mặt cong đa thức (chỉ trên điểm nền) + hiệu chỉnh cục bộ phần dư (vệt đèn, bóng mờ).
-    var bgP = polyFit(gray, bgMask, w, h), bg;
-    if (bgP) {
-      var resid = new Float32Array(n);
-      for (i = 0; i < n; i++) resid[i] = gray[i] - bgP[i];
-      var corr = maskedMean(resid, bgMask, w, h, r);
-      bg = new Float32Array(n);
-      for (i = 0; i < n; i++) bg[i] = bgP[i] + corr[i];
-    } else {
-      bg = maskedMean(gray, bgMask, w, h, r);
-    }
-
-    // 3) Độ chênh với nền → Otsu lần 2.
-    var diff = new Uint8Array(n), dh = new Float64Array(256);
+    for (i = 0; i < n; i++) bgMask[i] = obj0[i] || (mask && !mask[i]) ? 0 : 1;
+    var bg = estimateBg(gray, bgMask, w, h, r), diff = new Uint8Array(n);
     for (i = 0; i < n; i++) {
+      if (mask && !mask[i]) continue;
       var dv = dark ? bg[i] - gray[i] : gray[i] - bg[i];
-      dv = dv < 0 ? 0 : dv > 255 ? 255 : dv | 0;
-      diff[i] = dv; dh[dv]++;
+      diff[i] = dv < 0 ? 0 : dv > 255 ? 255 : dv | 0;
     }
-    var t2 = otsu(dh, n);
+    return { diff: diff, polarity: polarity };
+  }
+
+  // Độ chênh theo MÀU (nền đen/đỏ/xanh lá/xanh dương): khoảng cách màu tới nền ước lượng từng kênh.
+  // Vật sáng hơn, tối hơn hay khác sắc đều nổi lên như nhau.
+  function colorDiff(rgba, w, h, mask, nm, r) {
+    var n = w * h, i, c, ch = [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
+    for (i = 0; i < n; i++) { var j = i * 4; ch[0][i] = rgba[j]; ch[1][i] = rgba[j + 1]; ch[2][i] = rgba[j + 2]; }
+    var ones = new Uint8Array(n); ones.fill(1);
+    var b0 = ch.map(function (x) { return polyFit(x, mask, w, h) || maskedMean(x, mask || ones, w, h, r); });
+    var d0 = new Uint8Array(n);
+    for (i = 0; i < n; i++) {
+      var e0 = ch[0][i] - b0[0][i], e1 = ch[1][i] - b0[1][i], e2 = ch[2][i] - b0[2][i];
+      var dd = Math.sqrt(e0 * e0 + e1 * e1 + e2 * e2);
+      d0[i] = dd > 255 ? 255 : dd | 0;
+    }
+    var T0 = Math.max(8, 4 * madOf(d0, mask, n, nm)), obj0 = new Uint8Array(n);
+    for (i = 0; i < n; i++) obj0[i] = d0[i] > T0 ? 1 : 0;
+    obj0 = dilate(obj0, w, h);
+    var bgMask = new Uint8Array(n);
+    for (i = 0; i < n; i++) bgMask[i] = obj0[i] || (mask && !mask[i]) ? 0 : 1;
+    var bg = ch.map(function (x) { return estimateBg(x, bgMask, w, h, r); }), diff = new Uint8Array(n);
+    for (i = 0; i < n; i++) {
+      if (mask && !mask[i]) continue;
+      var s = 0;
+      for (c = 0; c < 3; c++) { var e = ch[c][i] - bg[c][i]; s += e * e; }
+      s = Math.sqrt(s);
+      diff[i] = s > 255 ? 255 : s | 0;
+    }
+    return { diff: diff, polarity: 'color' };
+  }
+
+  /**
+   * opts:
+   *  background: 'pad' (light pad trắng) | 'black' | 'red' | 'green' | 'blue' | 'none'
+   *              (bỏ trống: dùng autoPad như bản cũ)
+   *  region: true = chỉ đếm trong vùng nền tự nhận (mặc định true)
+   *  polarity: 'auto' | 'dark' | 'light' (chỉ dùng cho pad / none)
+   *  sensitivity: -50..50 · minArea: px (0 = tự động) · fillHoles · split: 'auto'|'shape'|'area'|'off'
+   *  denoise · mixedSizes
+   *  classify: true = đếm theo chủng loại · types: 0 = tự đoán số loại, 2..6 = cố định
+   */
+  function detect(rgba, w, h, opts) {
+    opts = opts || {};
+    var t0 = Date.now(), n = w * h, i;
+    var mode = opts.background || (opts.autoPad ? 'pad' : 'none');
+    var useRegion = opts.region !== false && (opts.background ? true : !!opts.autoPad);
+
+    // 0) Vùng đếm: nền trắng của light pad / tấm nền màu (nếu tìm thấy), ngược lại cả ảnh.
+    var region = null;
+    if (mode === 'auto') {
+      // Tự nhận nền: ưu tiên light pad trắng; không có thì chọn tấm nền màu chiếm vùng lớn nhất.
+      region = findPad(rgba, w, h);
+      if (region) mode = 'pad';
+      else {
+        var bestA = 0;
+        ['black', 'red', 'green', 'blue'].forEach(function (cname) {
+          var rg = findBoard(rgba, w, h, cname);
+          if (!rg) return;
+          var a = 0; for (var q = 0; q < n; q++) a += rg.mask[q];
+          if (a > bestA) { bestA = a; region = rg; mode = cname; }
+        });
+        if (!region) mode = 'none';
+      }
+      if (!useRegion) region = null;
+    } else if (useRegion && mode === 'pad') region = findPad(rgba, w, h);
+    else if (useRegion && COLOR_MODES[mode]) region = findBoard(rgba, w, h, mode);
+    var mask = region ? region.mask : null;
+    var nm = n;
+    if (mask) { nm = 0; for (i = 0; i < n; i++) nm += mask[i]; }
+
+    // 1–3) Ảnh độ chênh so với nền.
+    var r = Math.max(8, Math.round(Math.max(w, h) / 12));
+    var D = COLOR_MODES[mode] ? colorDiff(rgba, w, h, mask, nm, r) : grayDiff(rgba, w, h, mask, nm, r, opts);
+    var diff = D.diff, polarity = D.polarity, dh = new Float64Array(256);
+    for (i = 0; i < n; i++) if (!mask || mask[i]) dh[diff[i]]++;
+    var t2 = otsu(dh, nm);
     // Mức nhiễu nền ≈ trung vị độ chênh (đa số điểm là nền).
     var acc = 0, medDiff = 0;
-    for (i = 0; i < 256; i++) { acc += dh[i]; if (acc >= n / 2) { medDiff = i; break; } }
+    for (i = 0; i < 256; i++) { acc += dh[i]; if (acc >= nm / 2) { medDiff = i; break; } }
     var s = Math.max(-50, Math.min(50, opts.sensitivity || 0));
-    var thr = Math.max(0.5 * t2, 3 * medDiff + 5) * (1 - s / 100);
+    var thr = Math.max(0.5 * t2, 3 * medDiff + (COLOR_MODES[mode] ? 8 : 5)) * (1 - s / 100);
     thr = Math.max(4, thr);
     var bin = new Uint8Array(n), fgCount = 0;
-    for (i = 0; i < n; i++) if (diff[i] > thr) { bin[i] = 1; fgCount++; }
+    for (i = 0; i < n; i++) if (diff[i] > thr && (!mask || mask[i])) { bin[i] = 1; fgCount++; }
 
     // 4) Làm sạch: đóng (nối khe nhỏ, giữ viền mảnh của đá trong). Bụi nhỏ bị lọc theo diện tích ở bước 6.
     if (opts.denoise !== false) {
@@ -377,6 +727,7 @@ var Counter = (function () {
         if (rowEdge || bx0 < band || bx0 >= w - band) bin[by0 * w + bx0] = 0;
       }
     }
+    if (mask) for (i = 0; i < n; i++) if (!mask[i]) bin[i] = 0;
 
     // 5) Lấp lỗ bên trong vật (đá trong suốt soi đèn nền chỉ hiện viền).
     if (opts.fillHoles !== false) {
@@ -440,12 +791,17 @@ var Counter = (function () {
     var keep = new Int32Array(L.comps.length + 1);
     comps.forEach(function (c, idx) { keep[c.id] = idx + 1; });
 
+    // 8) Đếm theo chủng loại (tuỳ chọn).
+    var types = opts.classify ? classify(rgba, L.lab, keep, comps, markers, w, opts.types || 0, !!COLOR_MODES[mode]) : null;
+
     return {
       width: w, height: h, polarity: polarity, threshold: thr,
       singleArea: singleArea, radius: rS, minArea: minArea, uniform: uniform,
       comps: comps, markers: markers, clusterCount: clusterCount, hugeCount: hugeCount,
       count: markers.reduce(function (s2, mk) { return s2 + (mk.w || 1); }, 0),
-      labels: L.lab, keep: keep, fgRatio: fgCount / n, ms: Date.now() - t0
+      labels: L.lab, keep: keep, fgRatio: fgCount / Math.max(1, nm), ms: Date.now() - t0,
+      background: mode, types: types,
+      pad: region ? { hull: region.hull, area: nm, coverage: nm / n } : null
     };
   }
 
