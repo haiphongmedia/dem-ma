@@ -1,8 +1,8 @@
 /* Service worker: lưu sẵn giao diện để app mở được cả khi mạng chập chờn.
  * Luôn ưu tiên bản mới trên mạng (network-first), mất mạng mới dùng bản đã lưu.
  * Không đụng tới các lệnh gọi Apps Script. */
-var CACHE = 'dem-mat-v1';
-var SHELL = ['./', 'index.html', 'counter.js', 'worker.js', 'config.js', 'manifest.webmanifest', 'icon-192.png', 'apple-touch-icon.png'];
+var CACHE = 'dem-mat-v2';
+var SHELL = ['./', 'index.html', 'counter.js', 'worker.js', 'config.js', 'manifest.webmanifest'];
 
 self.addEventListener('install', function (e) {
   e.waitUntil(caches.open(CACHE).then(function (c) { return c.addAll(SHELL); }).then(function () { return self.skipWaiting(); }));

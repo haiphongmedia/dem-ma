@@ -389,7 +389,11 @@
   };
 
   // Vùng đếm = ảnh trừ lề %.
-  function roiOf(w, h) { var m = cfg.margin / 100; return { x: w * m, y: h * m, w: w * (1 - 2 * m), h: h * (1 - 2 * m) }; }
+  // Toạ độ nguyên: cắt theo pixel lẻ làm mép ảnh bị nhoè/tối trên Safari.
+  function roiOf(w, h) {
+    var m = cfg.margin / 100, x = Math.round(w * m), y = Math.round(h * m);
+    return { x: x, y: y, w: Math.max(1, Math.round(w - 2 * x)), h: Math.max(1, Math.round(h - 2 * y)) };
+  }
 
   function cropScale(src, sw, sh, maxSide) {
     var r = roiOf(sw, sh), sc = Math.min(1, maxSide / Math.max(r.w, r.h));

@@ -62,6 +62,62 @@ var Counter = (function () {
     return out;
   }
 
+  // Khớp mặt cong đa thức bậc 4 (15 hệ số) cho nền trên các điểm mask = 1 (mask null = mọi điểm).
+  // Mô tả tốt kiểu tối dần ra góc của ống kính điện thoại, kể cả sát mép ảnh.
+  var PT = [];
+  for (var pd = 0; pd <= 4; pd++) for (var pa = pd; pa >= 0; pa--) PT.push([pa, pd - pa]);
+  function polyFit(gray, mask, w, h) {
+    var T = PT.length, A = new Float64Array(T * T), B = new Float64Array(T), f = new Float64Array(T);
+    var step = Math.max(1, Math.round(Math.sqrt(w * h / 40000))), cnt = 0, x, y, p, q, k;
+    for (y = 0; y < h; y += step) {
+      var v = 2 * y / (h - 1 || 1) - 1;
+      for (x = 0; x < w; x += step) {
+        var idx = y * w + x;
+        if (mask && !mask[idx]) continue;
+        var u = 2 * x / (w - 1 || 1) - 1, g = gray[idx];
+        for (k = 0; k < T; k++) f[k] = Math.pow(u, PT[k][0]) * Math.pow(v, PT[k][1]);
+        for (p = 0; p < T; p++) { B[p] += f[p] * g; for (q = 0; q < T; q++) A[p * T + q] += f[p] * f[q]; }
+        cnt++;
+      }
+    }
+    if (cnt < 60) return null;
+    for (p = 0; p < T; p++) A[p * T + p] += 1e-6 * cnt;
+    // Khử Gauss có chọn trụ.
+    for (p = 0; p < T; p++) {
+      var piv = p;
+      for (q = p + 1; q < T; q++) if (Math.abs(A[q * T + p]) > Math.abs(A[piv * T + p])) piv = q;
+      if (piv !== p) {
+        for (k = 0; k < T; k++) { var tmp = A[p * T + k]; A[p * T + k] = A[piv * T + k]; A[piv * T + k] = tmp; }
+        var tb = B[p]; B[p] = B[piv]; B[piv] = tb;
+      }
+      var dg = A[p * T + p]; if (Math.abs(dg) < 1e-12) return null;
+      for (q = p + 1; q < T; q++) {
+        var fac = A[q * T + p] / dg; if (!fac) continue;
+        for (k = p; k < T; k++) A[q * T + k] -= fac * A[p * T + k];
+        B[q] -= fac * B[p];
+      }
+    }
+    var c = new Float64Array(T);
+    for (p = T - 1; p >= 0; p--) {
+      var s = B[p];
+      for (k = p + 1; k < T; k++) s -= A[p * T + k] * c[k];
+      c[p] = s / A[p * T + p];
+    }
+    // Tính nhanh: mỗi hàng quy về đa thức bậc 4 theo u, rồi Horner cho từng điểm.
+    var out = new Float32Array(w * h), rc = new Float64Array(5), du = 2 / (w - 1 || 1);
+    for (y = 0; y < h; y++) {
+      var vv = 2 * y / (h - 1 || 1) - 1;
+      rc[0] = rc[1] = rc[2] = rc[3] = rc[4] = 0;
+      for (k = 0; k < T; k++) rc[PT[k][0]] += c[k] * Math.pow(vv, PT[k][1]);
+      var o = y * w;
+      for (x = 0; x < w; x++) {
+        var uu = x * du - 1;
+        out[o + x] = (((rc[4] * uu + rc[3]) * uu + rc[2]) * uu + rc[1]) * uu + rc[0];
+      }
+    }
+    return out;
+  }
+
   // Co / giãn hình chữ thập 3x3 trên ảnh nhị phân.
   function erode(src, w, h) {
     var d = new Uint8Array(w * h);
@@ -254,10 +310,10 @@ var Counter = (function () {
     var t0 = Date.now(), n = w * h, i;
     var gray = toGray(rgba, n);
 
-    // 1) Nền thô = trung bình cục bộ cửa sổ lớn (chịu được ánh sáng lệch).
+    // 1) Nền thô = mặt cong đa thức khớp trên toàn ảnh (vật chỉ là thiểu số điểm ảnh).
     var r = Math.max(8, Math.round(Math.max(w, h) / 12));
     var ones = new Uint8Array(n); ones.fill(1);
-    var bg0 = maskedMean(gray, ones, w, h, r);
+    var bg0 = polyFit(gray, null, w, h) || maskedMean(gray, ones, w, h, r);
     var dev = new Int16Array(n), ah = new Float64Array(256);
     for (i = 0; i < n; i++) {
       var dd0 = Math.round(gray[i] - bg0[i]);
@@ -279,7 +335,17 @@ var Counter = (function () {
     obj0 = dilate(obj0, w, h);
     var bgMask = new Uint8Array(n);
     for (i = 0; i < n; i++) bgMask[i] = obj0[i] ? 0 : 1;
-    var bg = maskedMean(gray, bgMask, w, h, r);
+    // Nền = mặt cong đa thức (chỉ trên điểm nền) + hiệu chỉnh cục bộ phần dư (vệt đèn, bóng mờ).
+    var bgP = polyFit(gray, bgMask, w, h), bg;
+    if (bgP) {
+      var resid = new Float32Array(n);
+      for (i = 0; i < n; i++) resid[i] = gray[i] - bgP[i];
+      var corr = maskedMean(resid, bgMask, w, h, r);
+      bg = new Float32Array(n);
+      for (i = 0; i < n; i++) bg[i] = bgP[i] + corr[i];
+    } else {
+      bg = maskedMean(gray, bgMask, w, h, r);
+    }
 
     // 3) Độ chênh với nền → Otsu lần 2.
     var diff = new Uint8Array(n), dh = new Float64Array(256);
@@ -302,6 +368,15 @@ var Counter = (function () {
     if (opts.denoise !== false) {
       bin = erode(dilate(bin, w, h), w, h);
     }
+    // Bỏ dải sát mép ảnh: mép khung cắt từ video/ảnh hay bị tối hoặc nhoè 1–2 px
+    // (nhất là Safari) và sẽ bị hiểu nhầm thành hàng trăm vật nhỏ.
+    var band = Math.max(3, Math.round(Math.min(w, h) * 0.006));
+    for (var by0 = 0; by0 < h; by0++) {
+      var rowEdge = by0 < band || by0 >= h - band;
+      for (var bx0 = 0; bx0 < w; bx0++) {
+        if (rowEdge || bx0 < band || bx0 >= w - band) bin[by0 * w + bx0] = 0;
+      }
+    }
 
     // 5) Lấp lỗ bên trong vật (đá trong suốt soi đèn nền chỉ hiện viền).
     if (opts.fillHoles !== false) {
@@ -320,9 +395,14 @@ var Counter = (function () {
 
     // 6) Gán nhãn, lọc nhiễu, ước lượng diện tích một vật đơn.
     var L = label(bin, w, h, 1, true);
-    var areas = L.comps.map(function (c) { return c.area; }).filter(function (a) { return a >= 6; });
-    var med0 = median(areas);
-    var minArea = opts.minArea > 0 ? opts.minArea : Math.max(6, Math.round(0.08 * med0));
+    // Ngưỡng bụi tự động dựa trên trung vị THEO DIỆN TÍCH (cỡ vật chứa nửa số điểm ảnh),
+    // nên hàng trăm chấm nhiễu li ti không kéo lệch được cỡ của vật thật.
+    var areas = L.comps.map(function (c) { return c.area; }).filter(function (a) { return a >= 6; })
+      .sort(function (p, q) { return p - q; });
+    var totA = 0, cumA = 0, wMed = 0;
+    for (i = 0; i < areas.length; i++) totA += areas[i];
+    for (i = 0; i < areas.length; i++) { cumA += areas[i]; if (cumA >= totA / 2) { wMed = areas[i]; break; } }
+    var minArea = opts.minArea > 0 ? opts.minArea : Math.max(6, Math.round(0.04 * wMed));
     var comps = L.comps.filter(function (c) { return c.area >= minArea; });
     var big = comps.map(function (c) { return c.area; });
     var m1 = median(big);
