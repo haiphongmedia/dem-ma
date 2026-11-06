@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Đếm mắt trang sức</title>
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Đếm mắt">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  :root { --ok: #2ee66b; --warn: #ffb020; --bad: #ff4d4d; --glass: rgba(0, 0, 0, .55); }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: #000; color: #fff; overflow: hidden;
+    font: 15px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overscroll-behavior: none; }
+  #stage { position: fixed; inset: 0; }
+  #stage video, #stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  #still { display: none; }
+
+  /* Số đếm */
+  #top { position: fixed; top: calc(env(safe-area-inset-top) + 10px); left: 0; right: 0; display: flex;
+    flex-direction: column; align-items: center; gap: 8px; pointer-events: none; }
+  #hud { max-width: 94vw;
+    background: var(--glass); border-radius: 22px; padding: 6px 22px 8px; text-align: center; min-width: 150px;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); pointer-events: none; }
+  #count { font-size: 68px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: -1px; }
+  #state { font-size: 13px; margin-top: 2px; color: #cfd6de; white-space: nowrap; }
+  #state .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; background: #888; }
+  #state.ok .dot { background: var(--ok); } #state.busy .dot { background: var(--warn); } #state.frozen .dot { background: #4da3ff; }
+  #types { display: none; flex-wrap: wrap; justify-content: center; gap: 6px 12px; margin-top: 6px; }
+  #types .chip { font-size: 17px; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #types .chip i { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+  #legend { display: none; position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(env(safe-area-inset-bottom) + 116px); pointer-events: none; background: rgba(0, 0, 0, .7); border-radius: 14px; padding: 8px 12px; font-size: 13px; color: #e6eaee;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); max-width: 94vw; }
+  #legend div { white-space: nowrap; margin: 2px 0; }
+  #legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  #notice {
+    background: rgba(255, 176, 32, .92); color: #111; font-size: 13px; font-weight: 600; padding: 6px 12px; border-radius: 10px;
+    display: none; max-width: 92vw; text-align: center; pointer-events: none; }
+
+  /* Thanh nút */
+  #bar { position: fixed; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom) + 18px);
+    display: flex; justify-content: center; align-items: center; gap: 26px; }
+  .rbtn { width: 62px; height: 62px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .35); background: var(--glass);
+    color: #fff; font: 600 11px/1.1 system-ui, sans-serif; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 3px; cursor: pointer; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+  .rbtn svg { width: 24px; height: 24px; }
+  .rbtn.main { width: 82px; height: 82px; background: #fff; color: #111; border: 4px solid rgba(255, 255, 255, .5); font-size: 12px; }
+  .rbtn.main svg { width: 30px; height: 30px; }
+  .rbtn.on { background: #ffd34d; color: #111; }
+  .rbtn.hidden-btn { visibility: hidden; }
+
+  /* Bảng thiết lập */
+  #sheet { position: fixed; left: 0; right: 0; bottom: 0; max-height: 78vh; overflow: auto; background: #fff; color: #1d232b;
+    border-radius: 18px 18px 0 0; padding: 14px 18px calc(env(safe-area-inset-bottom) + 18px);
+    transform: translateY(105%); transition: transform .25s ease; z-index: 5; }
+  #sheet.open { transform: translateY(0); }
+  #sheet h2 { font-size: 17px; margin: 4px 0 10px; display: flex; justify-content: space-between; align-items: center; }
+  #sheet h2 button { border: 0; background: #eef1f5; border-radius: 10px; padding: 8px 14px; font: 600 15px system-ui, sans-serif; }
+  #sheet label.f { display: block; font-size: 13px; color: #5d6875; margin: 12px 0 4px; }
+  #sheet .val { float: right; color: #1d232b; font-weight: 700; }
+  #sheet input[type=range] { width: 100%; }
+  #sheet select { width: 100%; font: inherit; padding: 9px; border: 1px solid #dde1e6; border-radius: 8px; background: #fff; }
+  #sheet .check { display: flex; align-items: center; gap: 10px; margin: 12px 0; font-size: 15px; }
+  #sheet .check input { width: 20px; height: 20px; }
+  #sheet .hint { font-size: 12px; color: #5d6875; margin-top: 6px; }
+  #sheet a.link { display: block; margin-top: 16px; padding: 12px; text-align: center; border: 1px solid #dde1e6;
+    border-radius: 10px; color: #1565c0; font-weight: 600; text-decoration: none; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+
+  /* Thông báo camera */
+  #camMsg { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; text-align: center;
+    padding: 30px; background: #111; z-index: 4; }
+  #camMsg .box { max-width: 360px; color: #cfd6de; font-size: 15px; }
+  #camMsg button, #camMsg label { display: inline-block; margin: 14px 6px 0; padding: 12px 18px; border-radius: 12px;
+    border: 0; font: 600 15px system-ui, sans-serif; background: #1565c0; color: #fff; cursor: pointer; }
+  #camMsg label input { display: none; }
+  #fileIn { display: none; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="still"></canvas>
+  <canvas id="ovl"></canvas>
+</div>
+
+<div id="top">
+  <div id="hud">
+    <div id="count">–</div>
+    <div id="state"><span class="dot"></span><span id="stateText">Đang mở camera…</span></div>
+    <div id="types"></div>
+  </div>
+  <div id="notice"></div>
+</div>
+<div id="legend"></div>
+
+<div id="bar">
+  <button class="rbtn hidden-btn" id="btnTorch" title="Đèn flash">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>Đèn</button>
+  <button class="rbtn main" id="btnFreeze" title="Dừng hình và đếm nét">
+    <svg id="icoPause" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+    <svg id="icoPlay" viewBox="0 0 24 24" fill="currentColor" style="display:none"><path d="M7 5v14l12-7z"/></svg>
+    <span id="freezeText">Dừng</span></button>
+  <button class="rbtn" id="btnSettings" title="Thiết lập">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>Cài đặt</button>
+</div>
+
+<div id="sheet">
+  <h2>Thiết lập đếm <button id="btnClose">Xong</button></h2>
+  <label class="f">Nền đếm</label>
+  <select id="sBg">
+    <option value="auto">Tự nhận (khuyên dùng)</option>
+    <option value="pad">Light pad trắng (đèn nền)</option>
+    <option value="black">Nền đen</option>
+    <option value="red">Nền đỏ</option>
+    <option value="green">Nền xanh lá</option>
+    <option value="blue">Nền xanh dương</option>
+    <option value="none">Không dùng nền riêng (toàn khung)</option>
+  </select>
+  <div class="hint" id="bgHint"></div>
+  <div class="check"><input type="checkbox" id="sRegion" checked><label for="sRegion">Chỉ đếm trong vùng nền (tự nhận)</label></div>
+  <div class="check"><input type="checkbox" id="sCls"><label for="sCls"><b>Đếm theo chủng loại</b></label></div>
+  <div id="clsBox">
+    <label class="f">Số loại</label>
+    <select id="sK">
+      <option value="0">Tự đoán</option>
+      <option value="2">2 loại</option><option value="3">3 loại</option><option value="4">4 loại</option>
+      <option value="5">5 loại</option><option value="6">6 loại</option>
+    </select>
+    <div class="hint">Gom vật theo kích thước, độ thuôn dài, độ góc cạnh và màu (màu chỉ dùng với nền màu, vì đèn nền biến mọi vật thành bóng đen). Loại 1 là loại nhỏ nhất.</div>
+  </div>
+  <label class="f">Độ nhạy <span class="val" id="vSens">0</span></label>
+  <input type="range" id="sSens" min="-50" max="50" step="5" value="0">
+  <label class="f">Bỏ hạt nhỏ hơn (px², 0 = tự động) <span class="val" id="vMin">tự động</span></label>
+  <input type="range" id="sMin" min="0" max="300" step="5" value="0">
+  <div class="grid2">
+    <div>
+      <label class="f">Tách vật dính</label>
+      <select id="sSplit">
+        <option value="auto">Tự động</option>
+        <option value="shape">Theo hình dạng</option>
+        <option value="area">Theo diện tích</option>
+        <option value="off">Không tách</option>
+      </select>
+    </div>
+    <div>
+      <label class="f">Kiểu ảnh</label>
+      <select id="sPol">
+        <option value="auto">Tự nhận</option>
+        <option value="dark">Vật tối / nền sáng</option>
+        <option value="light">Vật sáng / nền tối</option>
+      </select>
+    </div>
+    <div>
+      <label class="f">Độ nét đếm trực tiếp</label>
+      <select id="sLive">
+        <option value="540">540 px (nhanh)</option>
+        <option value="720">720 px</option>
+        <option value="960">960 px (vật nhỏ)</option>
+      </select>
+    </div>
+    <div>
+      <label class="f">Độ nét khi Dừng</label>
+      <select id="sStill">
+        <option value="1600">1600 px</option>
+        <option value="2400">2400 px (vật ~1 mm)</option>
+      </select>
+    </div>
+  </div>
+  <div class="check"><input type="checkbox" id="sMixed"><label for="sMixed">Trộn nhiều cỡ trong một lần đếm</label></div>
+  <div class="check"><input type="checkbox" id="sHoles" checked><label for="sHoles">Lấp lõi đá trong suốt</label></div>
+  <div class="check"><input type="checkbox" id="sDots" checked><label for="sDots">Hiện chấm đánh dấu trên vật</label></div>
+  <label class="f">Đếm từ ảnh có sẵn</label>
+  <button id="btnFile" style="width:100%;padding:11px;border:1px solid #dde1e6;border-radius:10px;background:#fff;font:600 15px system-ui,sans-serif">Chọn ảnh…</button>
+  <div class="hint" id="diag"></div>
+  <div class="hint" style="text-align:center;margin-top:16px">Phiên bản: đếm trực tiếp v5 (06/11/2026)</div>
+</div>
+
+<div id="camMsg"><div class="box">
+  <div id="camText"></div>
+  <button id="btnCam">Thử bật lại</button>
+  <label>Chọn ảnh<input type="file" id="fileIn2" accept="image/*" capture="environment"></label>
+</div></div>
+<input type="file" id="fileIn" accept="image/*">
+
+<script src="counter.js"></script>
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var video = $('video'), ovl = $('ovl'), still = $('still');
+
+  var S = {
+    stream: null, track: null, torch: false, paused: false, busy: false, loopTimer: null,
+    hist: [], lastRes: null, lastScale: 1, worker: null, workerOk: true, jobs: {}, jobSeq: 0,
+    wakeLock: null, frameW: 0, frameH: 0, msAvg: 0
+  };
+
+  // ---------- Thiết lập (lưu trên máy) ----------
+  function lsGet(k, d) { try { var v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  var DEF = { bg: 'auto', region: true, cls: false, k: 0, sens: 0, minArea: 0, split: 'auto', pol: 'auto', live: 720, still: 1600, mixed: false, holes: true, dots: true };
+  var saved = lsGet('dem_live', {});
+  if (saved.pad === false) saved.region = false; // bản trước dùng "pad"
+  delete saved.pad;
+  var cfg = Object.assign({}, DEF, saved);
+  var BG_NAME = { auto: 'nền phù hợp', pad: 'nền trắng của light pad', black: 'tấm nền đen', red: 'tấm nền đỏ', green: 'tấm nền xanh lá', blue: 'tấm nền xanh dương', none: '' };
+  var BG_SHORT = { pad: 'light pad', black: 'nền đen', red: 'nền đỏ', green: 'nền xanh lá', blue: 'nền xanh dương', none: 'toàn khung' };
+  var BG_HINT = {
+    auto: 'Máy tự nhận: light pad trắng (khung màu gì cũng được) hoặc tấm nền đen / đỏ / xanh lá / xanh dương.',
+    pad: 'Đèn nền từ dưới, vật thành bóng đen. Khung viền màu gì cũng được (đen, đỏ, xanh lá, xanh dương).',
+    black: 'Chiếu sáng từ trên. Hợp với vật sáng màu: bạc, vàng, ngọc trai, đá màu.',
+    red: 'Chiếu sáng từ trên. Không dùng cho vật màu đỏ / hồng đậm.',
+    green: 'Chiếu sáng từ trên. Không dùng cho vật màu xanh lá.',
+    blue: 'Chiếu sáng từ trên. Không dùng cho vật màu xanh dương.',
+    none: 'Đếm trên toàn khung hình, không tự tìm vùng nền.'
+  };
+  var PALETTE = ['#2ee66b', '#ff9f1c', '#3da5ff', '#ff4fd8', '#ffe14d', '#b388ff'];
+  function toUI() {
+    $('sBg').value = cfg.bg; $('sRegion').checked = cfg.region; $('sCls').checked = cfg.cls; $('sK').value = String(cfg.k);
+    $('bgHint').textContent = BG_HINT[cfg.bg] || ''; $('clsBox').style.display = cfg.cls ? 'block' : 'none';
+    $('sRegion').disabled = cfg.bg === 'none'; $('sPol').disabled = cfg.bg !== 'pad' && cfg.bg !== 'none' && cfg.bg !== 'auto';
+    $('sSens').value = cfg.sens; $('sMin').value = cfg.minArea;
+    $('sSplit').value = cfg.split; $('sPol').value = cfg.pol; $('sLive').value = String(cfg.live);
+    $('sStill').value = String(cfg.still); $('sMixed').checked = cfg.mixed; $('sHoles').checked = cfg.holes; $('sDots').checked = cfg.dots;
+    $('vSens').textContent = cfg.sens; $('vMin').textContent = cfg.minArea || 'tự động';
+  }
+  function fromUI() {
+    cfg.bg = $('sBg').value; cfg.region = $('sRegion').checked; cfg.cls = $('sCls').checked; cfg.k = +$('sK').value;
+    cfg.sens = +$('sSens').value; cfg.minArea = +$('sMin').value;
+    cfg.split = $('sSplit').value; cfg.pol = $('sPol').value; cfg.live = +$('sLive').value; cfg.still = +$('sStill').value;
+    cfg.mixed = $('sMixed').checked; cfg.holes = $('sHoles').checked; cfg.dots = $('sDots').checked;
+    $('vSens').textContent = cfg.sens; $('vMin').textContent = cfg.minArea || 'tự động';
+    lsSet('dem_live', cfg);
+    toUI(); S.autoBg = null;
+    S.hist = []; S.thist = [];
+    if (S.paused && S.stillSrc) countStill();
+  }
+  ['sBg', 'sRegion', 'sCls', 'sK', 'sSens', 'sMin', 'sSplit', 'sPol', 'sLive', 'sStill', 'sMixed', 'sHoles', 'sDots'].forEach(function (id) {
+    $(id).addEventListener('change', fromUI);
+    $(id).addEventListener('input', function () { $('vSens').textContent = $('sSens').value; $('vMin').textContent = +$('sMin').value || 'tự động'; });
+  });
+  toUI();
+  function opts() {
+    // Tự nhận nền: dò lại định kỳ, giữa các lần dùng luôn loại nền vừa nhận để đếm nhanh.
+    var bgUse = cfg.bg;
+    if (cfg.bg === 'auto' && S.autoBg && (S.frameNo % 15) && !S.paused) bgUse = S.autoBg;
+    return { background: bgUse, region: cfg.region, classify: cfg.cls, types: cfg.k,
+      sensitivity: cfg.sens, minArea: cfg.minArea, split: cfg.split,
+      polarity: cfg.pol, mixedSizes: cfg.mixed, fillHoles: cfg.holes };
+  }
+
+  // ---------- Bộ đếm chạy nền ----------
+  try {
+    S.worker = new Worker('worker.js');
+    S.worker.onmessage = function (e) {
+      var job = S.jobs[e.data.id]; if (!job) return; delete S.jobs[e.data.id];
+      if (e.data.err) job.reject(new Error(e.data.err)); else job.resolve(e.data.res);
+    };
+    S.worker.onerror = function () { S.workerOk = false; };
+  } catch (e) { S.workerOk = false; }
+
+  function detect(cv) {
+    var ctx = cv.getContext('2d', { willReadFrequently: true });
+    var img = ctx.getImageData(0, 0, cv.width, cv.height), o = opts();
+    if (S.worker && S.workerOk) {
+      return new Promise(function (resolve, reject) {
+        var id = ++S.jobSeq; S.jobs[id] = { resolve: resolve, reject: reject };
+        S.worker.postMessage({ id: id, buf: img.data.buffer, w: cv.width, h: cv.height, opts: o }, [img.data.buffer]);
+        setTimeout(function () {
+          if (S.jobs[id]) { delete S.jobs[id]; S.workerOk = false;
+            resolve(Counter.detect(ctx.getImageData(0, 0, cv.width, cv.height).data, cv.width, cv.height, o)); }
+        }, 15000);
+      });
+    }
+    return new Promise(function (resolve) { setTimeout(function () { resolve(Counter.detect(img.data, cv.width, cv.height, o)); }, 0); });
+  }
+
+  // Thu nhỏ một khung (video / ảnh) sao cho cạnh dài ≤ maxSide.
+  function scaled(src, sw, sh, maxSide) {
+    var sc = Math.min(1, maxSide / Math.max(sw, sh)), c = document.createElement('canvas');
+    c.width = Math.round(sw * sc); c.height = Math.round(sh * sc);
+    c.getContext('2d', { willReadFrequently: true }).drawImage(src, 0, 0, c.width, c.height);
+    return c;
+  }
+
+  // ---------- Hiển thị ----------
+  function setState(kind, text) { $('state').className = kind; $('stateText').textContent = text; }
+  function notice(text) { var n = $('notice'); n.textContent = text || ''; n.style.display = text ? 'block' : 'none'; }
+
+  function drawOverlay(res, scale, fw, fh) {
+    if (ovl.width !== fw || ovl.height !== fh) { ovl.width = fw; ovl.height = fh; }
+    var ctx = ovl.getContext('2d'); ctx.clearRect(0, 0, fw, fh);
+    if (!res) return;
+    var lw = Math.max(2, fw / 360);
+    if (res.pad && res.pad.hull) {
+      var hp = res.pad.hull;
+      ctx.beginPath();
+      hp.forEach(function (p, i) { var x = (p[0] + 0.5) * scale, y = (p[1] + 0.5) * scale; if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+      ctx.closePath(); ctx.lineWidth = lw; ctx.strokeStyle = 'rgba(255,255,255,.75)'; ctx.stroke();
+    }
+    if (!cfg.dots) return;
+    var rad = Math.max(3, Math.min(res.radius * scale * 0.45, fw / 60));
+    res.markers.forEach(function (m) {
+      var x = (m.x + 0.5) * scale, y = (m.y + 0.5) * scale;
+      var col = m.kind === 'huge' ? '#ff4d4d' : res.types && res.types.length > 1 ? PALETTE[m.t % PALETTE.length]
+        : m.kind === 'single' ? '#2ee66b' : '#ffb020';
+      ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2);
+      ctx.lineWidth = lw * 1.8; ctx.strokeStyle = 'rgba(0,0,0,.55)'; ctx.stroke();
+      ctx.lineWidth = lw; ctx.strokeStyle = col; ctx.stroke();
+      if (m.w > 1) { ctx.font = 'bold ' + Math.round(rad * 2.4) + 'px system-ui'; ctx.fillStyle = '#ff4d4d'; ctx.fillText('×' + m.w, x + rad * 1.3, y); }
+    });
+  }
+
+  function median(a) { var b = a.slice().sort(function (p, q) { return p - q; }); return b[b.length >> 1]; }
+
+  function showLive(res, ms) {
+    S.hist.push(res.count); if (S.hist.length > 7) S.hist.shift();
+    var shown = median(S.hist), last5 = S.hist.slice(-5);
+    var stable = last5.length >= 5 && Math.max.apply(null, last5) - Math.min.apply(null, last5) <= 1;
+    $('count').textContent = shown;
+    setState(stable ? 'ok' : 'busy', (stable ? 'Ổn định' : 'Đang đo…') + (cfg.bg === 'auto' ? ' · ' + BG_SHORT[res.pad ? res.background : 'none'] : ''));
+    // Số từng loại: trung vị vài lần gần nhất (chỉ khi số loại không đổi).
+    var tc = res.types ? res.types.map(function (t) { return t.count; }) : null;
+    if (!tc || !S.thist || !S.thist.length || S.thist[0].length !== tc.length) S.thist = [];
+    if (tc) { S.thist.push(tc); if (S.thist.length > 7) S.thist.shift(); }
+    showTypes(res.types, tc && tc.map(function (_, j) { return median(S.thist.map(function (a) { return a[j]; })); }), false);
+    padNotice(res);
+    S.msAvg = S.msAvg ? S.msAvg * 0.8 + ms * 0.2 : ms;
+    $('diag').textContent = 'Trực tiếp: ' + res.width + '×' + res.height + ' px · ' + Math.round(S.msAvg) + ' ms/lần · ' +
+      (res.pad ? 'vùng nền ' + Math.round(res.pad.coverage * 100) + '% khung' : 'toàn khung') + (res.types ? ' · ' + res.types.length + ' loại' : '') +
+      ' · cỡ vật ≈ ' + (2 * res.radius).toFixed(1) + ' px · ' + res.clusterCount + ' cụm' +
+      ' · bộ đếm ' + (S.worker && S.workerOk ? 'chạy nền' : 'chạy trực tiếp');
+  }
+  // Hiện số theo loại: chip trong ô số đếm; khi dừng hình thêm bảng chú giải chi tiết.
+  function showTypes(types, counts, detail) {
+    var box = $('types'), lg = $('legend');
+    if (!cfg.cls || !types || !types.length) { box.style.display = 'none'; lg.style.display = 'none'; return; }
+    counts = counts || types.map(function (t) { return t.count; });
+    box.innerHTML = types.map(function (t, j) {
+      return '<span class="chip"><i style="background:' + PALETTE[j % PALETTE.length] + '"></i>' + counts[j] + '</span>';
+    }).join('');
+    box.style.display = types.length > 1 ? 'flex' : 'none';
+    if (!detail) { lg.style.display = 'none'; return; }
+    lg.innerHTML = types.map(function (t, j) {
+      return '<div><i style="background:' + PALETTE[j % PALETTE.length] + '"></i><b>Loại ' + (j + 1) + ': ' + t.count + '</b> · Ø≈' +
+        t.diam.toFixed(0) + ' px · ' + t.shape + (t.color ? ' · ' + t.color : '') + '</div>';
+    }).join('') + (types.length === 1 ? '<div>Chỉ thấy 1 loại.</div>' : '');
+    lg.style.display = 'block';
+  }
+  function padNotice(res) {
+    if (cfg.bg !== 'none' && cfg.region && !res.pad) notice(cfg.bg === 'auto' ? 'Không nhận ra nền đếm — đang đếm toàn khung. Đưa cả tấm nền vào khung hình.'
+      : 'Không thấy ' + BG_NAME[cfg.bg] + ' — đang đếm toàn khung. Kiểm tra mục "Nền đếm".');
+    else if (res.hugeCount) notice('Có vùng tối lớn bất thường — kiểm tra vật chồng nhau hoặc bóng đổ');
+    else notice('');
+  }
+
+  // ---------- Vòng đếm trực tiếp ----------
+  function loop() {
+    clearTimeout(S.loopTimer);
+    if (S.paused || document.hidden) return;
+    if (!video.videoWidth || S.busy) { S.loopTimer = setTimeout(loop, 200); return; }
+    S.busy = true;
+    var vw = video.videoWidth, vh = video.videoHeight, cv = scaled(video, vw, vh, cfg.live), t0 = performance.now();
+    detect(cv).then(function (res) {
+      if (S.paused) return;
+      S.lastRes = res; S.frameNo = (S.frameNo || 0) + 1;
+      if (cfg.bg === 'auto') S.autoBg = res.pad ? res.background : null;
+      drawOverlay(res, vw / cv.width, vw, vh);
+      showLive(res, performance.now() - t0);
+    }).catch(function () {}).then(function () {
+      S.busy = false; S.loopTimer = setTimeout(loop, 60);
+    });
+  }
+
+  // ---------- Dừng hình: đếm lại khung hiện tại ở độ nét cao ----------
+  function freezeFrom(src, w, h) {
+    S.paused = true; clearTimeout(S.loopTimer);
+    still.width = w; still.height = h;
+    still.getContext('2d').drawImage(src, 0, 0, w, h);
+    still.style.display = 'block'; video.style.visibility = 'hidden';
+    S.stillSrc = still;
+    $('icoPause').style.display = 'none'; $('icoPlay').style.display = 'block'; $('freezeText').textContent = 'Tiếp tục';
+    countStill();
+  }
+  function countStill() {
+    var w = still.width, h = still.height, cv = scaled(still, w, h, cfg.still), t0 = performance.now();
+    setState('frozen', 'Đang đếm nét…');
+    detect(cv).then(function (res) {
+      if (!S.paused) return;
+      drawOverlay(res, w / cv.width, w, h);
+      $('count').textContent = res.count;
+      setState('frozen', 'Đã dừng · đếm nét ' + res.width + ' px' + (cfg.bg === 'auto' ? ' · ' + BG_SHORT[res.pad ? res.background : 'none'] : ''));
+      padNotice(res);
+      showTypes(res.types, null, true);
+      $('diag').textContent = 'Dừng hình: ' + res.width + '×' + res.height + ' px · ' + Math.round(performance.now() - t0) + ' ms · ' +
+        (res.pad ? 'vùng nền ' + Math.round(res.pad.coverage * 100) + '% khung' : 'toàn khung') + (res.types ? ' · ' + res.types.length + ' loại' : '') +
+        ' · cỡ vật ≈ ' + (2 * res.radius).toFixed(1) + ' px · ' + res.clusterCount + ' cụm';
+    }).catch(function (e) { setState('busy', 'Lỗi: ' + e.message); });
+  }
+  function resume() {
+    S.paused = false; S.stillSrc = null; S.hist = []; S.thist = [];
+    $('legend').style.display = 'none';
+    still.style.display = 'none'; video.style.visibility = 'visible';
+    $('icoPause').style.display = 'block'; $('icoPlay').style.display = 'none'; $('freezeText').textContent = 'Dừng';
+    if (!camRunning()) { $('count').textContent = '–'; drawOverlay(null, 1, ovl.width, ovl.height); startCamera(); return; }
+    setState('busy', 'Đang đo…'); loop();
+  }
+  $('btnFreeze').onclick = function () {
+    if (S.paused) { resume(); return; }
+    if (!camRunning()) { $('fileIn2').click(); return; }
+    freezeFrom(video, video.videoWidth, video.videoHeight);
+  };
+
+  // Ảnh có sẵn → đếm như khi dừng hình.
+  function onFile(e) {
+    var f = e.target.files && e.target.files[0]; if (!f) return;
+    $('sheet').classList.remove('open'); $('camMsg').style.display = 'none';
+    var done = function (img, w, h) { freezeFrom(img, w, h); e.target.value = ''; };
+    if (window.createImageBitmap) {
+      createImageBitmap(f, { imageOrientation: 'from-image' }).then(function (b) { done(b, b.width, b.height); }).catch(function () { viaImg(f, done); });
+    } else viaImg(f, done);
+  }
+  function viaImg(f, cb) { var u = URL.createObjectURL(f), im = new Image(); im.onload = function () { cb(im, im.naturalWidth, im.naturalHeight); URL.revokeObjectURL(u); }; im.src = u; }
+  $('fileIn').onchange = onFile; $('fileIn2').onchange = onFile;
+  $('btnFile').onclick = function () { $('fileIn').click(); };
+
+  // ---------- Camera ----------
+  function camRunning() { return !!(S.track && S.track.readyState === 'live' && video.videoWidth); }
+  function camError(text) { $('camText').innerHTML = text; $('camMsg').style.display = 'flex'; setState('', 'Không có camera'); }
+  function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      camError('Trình duyệt này không cho dùng camera trực tiếp.<br>Hãy mở bằng Safari (iPhone) hoặc Chrome (Android), hoặc chọn ảnh để đếm.');
+      return;
+    }
+    if (S.stream) S.stream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} });
+    $('camMsg').style.display = 'none'; setState('busy', 'Đang mở camera…');
+    navigator.mediaDevices.getUserMedia({
+      audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } }
+    }).then(function (stream) {
+      S.stream = stream; S.track = stream.getVideoTracks()[0];
+      S.track.onended = function () { if (!S.paused) camError('Camera đã tắt.'); };
+      video.srcObject = stream;
+      var caps = {}; try { caps = S.track.getCapabilities ? S.track.getCapabilities() : {}; } catch (e) {}
+      $('btnTorch').classList.toggle('hidden-btn', !caps.torch);
+      if (caps.focusMode && caps.focusMode.indexOf('continuous') >= 0) {
+        S.track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(function () {});
+      }
+      return video.play();
+    }).then(function () {
+      keepAwake(); S.hist = []; setState('busy', 'Đang đo…'); loop();
+    }).catch(function (e) {
+      var name = e && e.name ? e.name : 'lỗi';
+      camError(name === 'NotAllowedError'
+        ? '<b>Chưa có quyền dùng camera.</b><br>Safari: chạm <b>AA</b> cạnh thanh địa chỉ → <b>Cài đặt trang web</b> → <b>Camera</b> → <b>Cho phép</b>, rồi bấm Thử bật lại.'
+        : 'Không mở được camera (' + name + '). Đóng app khác đang dùng camera rồi thử lại.');
+    });
+  }
+  $('btnCam').onclick = startCamera;
+
+  $('btnTorch').onclick = function () {
+    if (!S.track) return;
+    S.torch = !S.torch;
+    S.track.applyConstraints({ advanced: [{ torch: S.torch }] }).then(function () {
+      $('btnTorch').classList.toggle('on', S.torch);
+    }).catch(function () { S.torch = false; });
+  };
+
+  // Giữ màn hình luôn sáng khi đang đếm.
+  function keepAwake() {
+    try {
+      if ('wakeLock' in navigator && !S.wakeLock) {
+        navigator.wakeLock.request('screen').then(function (l) { S.wakeLock = l; l.addEventListener('release', function () { S.wakeLock = null; }); }).catch(function () {});
+      }
+    } catch (e) {}
+  }
+
+  // ---------- Bảng thiết lập ----------
+  $('btnSettings').onclick = function () { $('sheet').classList.add('open'); };
+  $('btnClose').onclick = function () { $('sheet').classList.remove('open'); };
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { clearTimeout(S.loopTimer); return; }
+    keepAwake();
+    if (S.paused) return;
+    if (!camRunning()) startCamera(); else loop();
+  });
+
+  // Luôn lấy bản mới nhất: đăng ký service worker không dùng bộ nhớ đệm HTTP và kiểm tra cập nhật mỗi lần mở.
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(function (reg) { reg.update(); }).catch(function () {});
+  }
+  startCamera();
+})();
+</script>
+</body>
+</html>
