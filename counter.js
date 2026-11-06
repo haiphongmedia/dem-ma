@@ -420,7 +420,7 @@ var Counter = (function () {
   }
 
   // Tách một cụm: trả về danh sách điểm đánh dấu {x, y} (toạ độ ảnh).
-  function splitComponent(lab, W, comp, rS, singleArea, mode, uniform) {
+  function splitComponent(lab, W, comp, rS, singleArea, mode, uniform, forcedN, dens) {
     var bx = comp.x0 - 1, by = comp.y0 - 1;
     var w = comp.x1 - comp.x0 + 3, h = comp.y1 - comp.y0 + 3;
     var m = new Uint8Array(w * h), x, y;
@@ -470,7 +470,10 @@ var Counter = (function () {
     }
 
     var nArea = comp.area / singleArea, n;
-    if (mode === 'area') {
+    if (forcedN) {
+      n = forcedN;
+      // Ưu tiên các đỉnh cách nhau xa: bỏ đỉnh thừa yếu nhất nếu nhiều hơn số vật.
+    } else if (mode === 'area') {
       n = Math.max(1, Math.round(nArea));
     } else if (mode === 'shape' || !uniform) {
       n = Math.max(1, kept.length);
@@ -501,6 +504,40 @@ var Counter = (function () {
           if (md > bestD) { bestD = md; bestP = pts[i]; }
         }
         marks.push({ x: bestP.x, y: bestP.y });
+      }
+    }
+    // Số vật đã biết (từ lượng vật) → tinh chỉnh vị trí dấu: k-means có trọng số theo độ tối của vật,
+    // để mỗi dấu nằm giữa một hạt (khe trống giữa các hạt có trọng số ≈ 0 nên không kéo dấu ra đó).
+    if (forcedN && marks.length > 1) {
+      var P = [], Wt = [], st = comp.area > 6000 ? 2 : 1;
+      for (y = 0; y < h; y += st) for (x = 0; x < w; x += st) {
+        if (!m[y * w + x]) continue;
+        var gx = x + bx, gy = y + by, wv = dens ? dens[gy * W + gx] : 1;
+        if (wv > 0.02) { P.push(gx, gy); Wt.push(wv); }
+      }
+      var K = marks.length, NP = Wt.length, asg = new Int32Array(NP), it2, j2;
+      if (NP > K) {
+        for (it2 = 0; it2 < 12; it2++) {
+          var sx = new Float64Array(K), sy = new Float64Array(K), sw = new Float64Array(K);
+          for (j2 = 0; j2 < NP; j2++) {
+            var px = P[2 * j2], py = P[2 * j2 + 1], bk = 0, bd = Infinity;
+            for (k = 0; k < K; k++) { var ddx = marks[k].x - px, ddy = marks[k].y - py, dq = ddx * ddx + ddy * ddy; if (dq < bd) { bd = dq; bk = k; } }
+            asg[j2] = bk; sx[bk] += px * Wt[j2]; sy[bk] += py * Wt[j2]; sw[bk] += Wt[j2];
+          }
+          for (k = 0; k < K; k++) if (sw[k] > 0) { marks[k].x = sx[k] / sw[k]; marks[k].y = sy[k] / sw[k]; }
+        }
+        // Kéo dấu về điểm tối gần nhất trên thân vật thuộc nhóm của nó.
+        var mx2 = new Float64Array(K);
+        for (j2 = 0; j2 < NP; j2++) if (Wt[j2] > mx2[asg[j2]]) mx2[asg[j2]] = Wt[j2];
+        for (k = 0; k < K; k++) {
+          var best2 = -1, bd2 = Infinity;
+          for (j2 = 0; j2 < NP; j2++) {
+            if (asg[j2] !== k || Wt[j2] < 0.5 * mx2[k]) continue;
+            var ex2 = P[2 * j2] - marks[k].x, ey2 = P[2 * j2 + 1] - marks[k].y, dd4 = ex2 * ex2 + ey2 * ey2;
+            if (dd4 < bd2) { bd2 = dd4; best2 = j2; }
+          }
+          if (best2 >= 0 && bd2 > 1) { marks[k].x = P[2 * best2]; marks[k].y = P[2 * best2 + 1]; }
+        }
       }
     }
     return marks;
@@ -622,13 +659,18 @@ var Counter = (function () {
     obj0 = dilate(obj0, w, h);
     var bgMask = new Uint8Array(n);
     for (i = 0; i < n; i++) bgMask[i] = obj0[i] || (mask && !mask[i]) ? 0 : 1;
-    var bg = estimateBg(gray, bgMask, w, h, r), diff = new Uint8Array(n);
+    var bg = estimateBg(gray, bgMask, w, h, r), diff = new Uint8Array(n), dens = new Float32Array(n);
     for (i = 0; i < n; i++) {
       if (mask && !mask[i]) continue;
       var dv = dark ? bg[i] - gray[i] : gray[i] - bg[i];
       diff[i] = dv < 0 ? 0 : dv > 255 ? 255 : dv | 0;
+      // "Độ cản sáng" (mật độ quang): vật hơi trong chồng lên nhau thì cộng dồn → đếm được cả chỗ gác chéo.
+      if (dark) {
+        var od = Math.log(Math.max(8, bg[i]) / Math.max(1, gray[i]));
+        dens[i] = od < 0 ? 0 : od > 3.2 ? 3.2 : od;
+      } else dens[i] = 1;
     }
-    return { diff: diff, polarity: polarity };
+    return { diff: diff, polarity: polarity, dens: dens };
   }
 
   // Độ chênh theo MÀU (nền đen/đỏ/xanh lá/xanh dương): khoảng cách màu tới nền ước lượng từng kênh.
@@ -657,7 +699,8 @@ var Counter = (function () {
       s = Math.sqrt(s);
       diff[i] = s > 255 ? 255 : s | 0;
     }
-    return { diff: diff, polarity: 'color' };
+    // Nền màu (chiếu từ trên, vật đục): "lượng vật" = diện tích; độ khác màu phụ thuộc màu vật nên không dùng.
+    return { diff: diff, polarity: 'color', dens: null };
   }
 
   /**
@@ -755,48 +798,167 @@ var Counter = (function () {
     for (i = 0; i < areas.length; i++) { cumA += areas[i]; if (cumA >= totA / 2) { wMed = areas[i]; break; } }
     var minArea = opts.minArea > 0 ? opts.minArea : Math.max(6, Math.round(0.04 * wMed));
     var comps = L.comps.filter(function (c) { return c.area >= minArea; });
-    var big = comps.map(function (c) { return c.area; });
-    var m1 = median(big);
-    var singleArea = median(big.filter(function (a) { return a <= 1.8 * m1; })) || m1 || 1;
+    var keep = new Int32Array(L.comps.length + 1);
+    comps.forEach(function (c, idx) { keep[c.id] = idx + 1; });
+
+    // 6b) "Lượng vật" của từng vùng. Hai thước đo:
+    //  - độ cản sáng cộng dồn (đèn nền, vật hơi trong: chồng/gác chéo vẫn cộng đủ),
+    //  - diện tích (vật đục, nền màu).
+    // Máy chọn thước đo làm các vật đơn đều nhau nhất; vật dính song song, gác chéo vẫn đếm đúng.
+    var dens = D.dens, ODS = new Float64Array(comps.length);
+    if (dens) for (i = 0; i < n; i++) { var kq = keep[L.lab[i]]; if (kq) ODS[kq - 1] += dens[i]; }
+    // Hình dạng từng vùng (độ thuôn, độ đặc kín) để phân biệt "cụm nhiều vật" với "vật đơn cỡ lớn".
+    var MS = { n: new Float64Array(comps.length), x: new Float64Array(comps.length), y: new Float64Array(comps.length),
+      xx: new Float64Array(comps.length), yy: new Float64Array(comps.length), xy: new Float64Array(comps.length) };
+    for (i = 0; i < n; i++) {
+      var km = keep[L.lab[i]]; if (!km) continue;
+      var cm2 = km - 1, yq = (i / w) | 0, xq = i - yq * w;
+      MS.n[cm2]++; MS.x[cm2] += xq; MS.y[cm2] += yq; MS.xx[cm2] += xq * xq; MS.yy[cm2] += yq * yq; MS.xy[cm2] += xq * yq;
+    }
+    var shapeE = [], shapeF = [];
+    comps.forEach(function (c, ci) {
+      var a = MS.n[ci] || 1, mx = MS.x[ci] / a, my = MS.y[ci] / a;
+      var cxx = MS.xx[ci] / a - mx * mx + 1 / 12, cyy = MS.yy[ci] / a - my * my + 1 / 12, cxy = MS.xy[ci] / a - mx * my;
+      var tr = cxx + cyy, det = Math.max(1e-6, cxx * cyy - cxy * cxy), disc = Math.sqrt(Math.max(0, tr * tr / 4 - det));
+      shapeE[ci] = Math.sqrt((tr / 2 + disc) / Math.max(1e-6, tr / 2 - disc));
+      shapeF[ci] = a / (4 * Math.PI * Math.sqrt(det));
+    });
+    function evalMass(mass) {
+      var R0 = { unit: 0, cv: 1, singleArea: 0, pop: false, intOk: false, ok: false };
+      var lg = [];
+      mass.forEach(function (v) { if (v > 0) lg.push(Math.log(v)); });
+      if (lg.length < 4) return R0;
+      var lo = Math.min.apply(null, lg), hi = Math.max.apply(null, lg), bins = 160, bw = 0.09;
+      var pk;
+      if (hi - lo < 1e-6) pk = Math.exp(lo);
+      else {
+        var kd = [], best = -1, bestX = lo, b, q;
+        for (b = 0; b <= bins; b++) {
+          var xg = lo + (hi - lo) * b / bins, dsum = 0;
+          for (q = 0; q < lg.length; q++) { var z = (lg[q] - xg) / bw; if (z > -4 && z < 4) dsum += Math.exp(-0.5 * z * z); }
+          kd.push(dsum);
+          if (dsum > best) { best = dsum; bestX = xg; }
+        }
+        // Đơn vị = đỉnh NHỎ NHẤT (đủ cao) mà đa số vùng là bội số nguyên của nó (1, 2, 3… vật).
+        pk = Math.exp(bestX);
+        for (b = 0; b <= bins; b++) {
+          var hgt = kd[b];
+          if (hgt < 0.2 * best || (b > 0 && kd[b - 1] > hgt) || (b < bins && kd[b + 1] > hgt)) continue;
+          var u = Math.exp(lo + (hi - lo) * b / bins), cn = 0, fit = 0, tot = 0;
+          for (q = 0; q < lg.length; q++) {
+            var rr = Math.exp(lg[q]) / u;
+            if (rr > 0.75 && rr < 1.33) cn++;
+            if (rr < 6.5) { tot++; var rk = Math.round(rr); if (rk >= 1 && Math.abs(rr - rk) <= 0.22) fit++; }
+          }
+          if (cn >= Math.max(3, 0.1 * lg.length) && tot && fit / tot >= 0.6) { pk = u; break; }
+        }
+      }
+      var near = [], nearA = [];
+      mass.forEach(function (v, ci) { if (v > 0.75 * pk && v < 1.33 * pk) { near.push(v); nearA.push(comps[ci].area); } });
+      var unitV = median(near) || pk;
+      R0.unit = unitV; R0.singleArea = median(nearA);
+      var band = mass.filter(function (v) { return v > 0.6 * unitV && v < 1.6 * unitV; });
+      if (band.length >= 4) {
+        var md = median(band);
+        R0.cv = 1.4826 * median(band.map(function (v) { return Math.abs(v - md); })) / md;
+      }
+      var nearUnit = 0, smallish = 0, multi = 0, multiFit = 0, cvU = Math.min(R0.cv, 0.25), gap = 0, low = 0;
+      mass.forEach(function (v) {
+        var r2 = v / unitV;
+        if (r2 < 2.5) { low++; if (r2 > 1.3 && r2 < 1.7) gap++; }
+        if (r2 < 1.6) { smallish++; if (r2 > 0.7 && r2 < 1.35) nearUnit++; }
+        if (r2 >= 1.5 && r2 <= 6.5) {
+          multi++;
+          // Dung sai tăng theo độ chênh tự nhiên của vật đơn và số vật trong cụm (tổng k vật dao động √k lần).
+          // Dung sai theo độ đều của vật đơn: vật đơn càng đều thì cụm thật càng phải sát số nguyên.
+          var kk = Math.round(r2), tol = Math.min(0.33, Math.max(0.1, 2.5 * cvU * Math.sqrt(kk) + 0.06));
+          if (Math.abs(r2 - kk) <= tol) multiFit++;
+        }
+      });
+      R0.pop = nearUnit >= 4 && nearUnit >= 0.6 * smallish;
+      // Vùng lớn phải ≈ bội số nguyên của đơn vị (đúng là cụm vật dính), không phải vật đơn cỡ khác.
+      var relax = !!opts.prevMass; // khung trước đã nhận đồng cỡ → nới nhẹ để không nhảy qua lại
+      R0.intOk = multi < 3 || multiFit >= (relax ? 0.45 : 0.55) * multi;
+      // "Khoảng trống": vật đồng cỡ thì gần như không có vùng nào cỡ 1,3–1,7 đơn vị (1 vật thì không to vậy,
+      // 2 vật thì không nhỏ vậy). Vật trộn hình dạng / cỡ sẽ lấp đầy khoảng này.
+      R0.gapFrac = low ? gap / low : 0;
+      // "Vật đơn phóng to": vùng ≥ 2 đơn vị mà hình dạng giống hệt vật đơn (cùng độ thuôn, cùng độ đặc)
+      // → thực ra là vật đơn cỡ khác, không phải cụm dính.
+      var refE = [], refF = [];
+      mass.forEach(function (v, ci) { var r4 = v / unitV; if (r4 > 0.75 && r4 < 1.33) { refE.push(shapeE[ci]); refF.push(shapeF[ci]); } });
+      var mE = median(refE) || 1, mF = median(refF) || 1, scaled = 0, multi2 = 0;
+      mass.forEach(function (v, ci) {
+        var r5 = v / unitV;
+        if (r5 < 1.6 || r5 > 6.5) return;
+        multi2++;
+        if (Math.abs(Math.log(shapeE[ci] / mE)) < 0.12 && Math.abs(shapeF[ci] - mF) < 0.05) scaled++;
+      });
+      R0.scaledFrac = multi2 ? scaled / multi2 : 0;
+      if (multi2 >= 3 && R0.scaledFrac >= 0.35) R0.intOk = false;
+      R0.ok = R0.pop && R0.intOk && R0.cv <= (relax ? 0.2 : 0.18) && R0.gapFrac <= (relax ? 0.09 : 0.07);
+      return R0;
+    }
+    var cands = [{ name: 'area', mass: comps.map(function (c) { return c.area; }) }];
+    if (dens) cands.unshift({ name: 'od', mass: Array.prototype.slice.call(ODS) });
+    var chosen = null;
+    cands.forEach(function (cd) { cd.ev = evalMass(cd.mass); });
+    // Ưu tiên độ cản sáng (đếm đúng cả chỗ gác chéo); chỉ dùng diện tích khi độ cản sáng không hợp lệ
+    // hoặc kém đều rõ rệt (vật đục: mỗi viên tối một khác).
+    var od = cands.filter(function (cd) { return cd.name === 'od'; })[0], ar = cands.filter(function (cd) { return cd.name === 'area'; })[0];
+    if (od && od.ev.ok && (!ar.ev.ok || od.ev.cv <= ar.ev.cv + 0.05)) chosen = od;
+    else if (ar.ev.ok) chosen = ar;
+    else chosen = cands[0];
+    var unit = chosen.ev.unit || 1, unitCV = chosen.ev.cv, integerOk = chosen.ev.intOk, uniformPop = chosen.ev.pop;
+    comps.forEach(function (c, idx) { c.mass = chosen.mass[idx]; });
+    var singleArea = chosen.ev.singleArea || median(comps.map(function (c) { return c.area; })) || 1;
     var rS = Math.sqrt(singleArea / Math.PI);
-    // Kích thước đồng đều? (tỉ lệ phân vị 75/25 của diện tích nhỏ) → được phép dùng diện tích để kiểm tra chéo.
-    var sorted = big.slice().sort(function (p, q) { return p - q; });
-    var q25 = sorted[Math.floor(sorted.length * 0.25)] || 1, q75 = sorted[Math.floor(sorted.length * 0.75)] || 1;
-    var uniform = opts.mixedSizes ? false : q75 / q25 < 2;
+    var uniform = !opts.mixedSizes && chosen.ev.ok;
+    var massKind = uniform ? chosen.name : 'shape';
+    if (!uniform) {
+      // Vật khác cỡ / khác hình: giữ cách cũ đã kiểm chứng (tách theo hình dạng, cỡ vật đơn = trung vị diện tích).
+      var big = comps.map(function (c) { return c.area; }), m1 = median(big);
+      singleArea = median(big.filter(function (a) { return a <= 1.8 * m1; })) || m1 || 1;
+      rS = Math.sqrt(singleArea / Math.PI);
+    }
+    // Cho cách cũ: kiểm tra chéo theo diện tích khi cỡ khá đều (tỉ lệ phân vị 75/25).
+    var sortedA = comps.map(function (c) { return c.area; }).sort(function (p, q) { return p - q; });
+    var q25 = sortedA[Math.floor(sortedA.length * 0.25)] || 1, q75 = sortedA[Math.floor(sortedA.length * 0.75)] || 1;
+    var areaUniform = !opts.mixedSizes && q75 / q25 < 2;
 
     // 7) Đếm + tách cụm.
     var split = opts.split || 'auto';
     var markers = [], clusterCount = 0, hugeCount = 0;
     comps.forEach(function (c, idx) {
-      var isCluster = split !== 'off' && c.area > 1.5 * singleArea;
+      var nd = c.mass / unit, nMass = Math.max(1, Math.round(nd));
       c.cluster = false;
-      // Vùng quá lớn (thường do nền/ánh sáng sai): không tách, chỉ ước lượng theo diện tích + cảnh báo.
-      if (split !== 'off' && c.area > 40 * singleArea) {
-        c.n = Math.max(1, Math.round(c.area / singleArea));
-        c.cluster = true; c.huge = true; clusterCount++; hugeCount++;
+      if (split === 'off') { c.n = 1; markers.push({ x: c.cx, y: c.cy, c: idx, kind: 'single' }); return; }
+      // Vùng quá lớn (thường do nền/ánh sáng sai): không tách, chỉ ước lượng + cảnh báo.
+      if (c.area > 40 * singleArea) {
+        c.n = nMass; c.cluster = true; c.huge = true; clusterCount++; hugeCount++;
         markers.push({ x: c.cx, y: c.cy, c: idx, kind: 'huge', w: c.n });
         return;
       }
+      var forced = null;
+      if (split === 'area' || (split === 'auto' && uniform)) forced = nMass;
+      var isCluster = forced !== null ? forced > 1 : c.area > 1.5 * singleArea;
       if (!isCluster) {
         c.n = 1;
         markers.push({ x: c.cx, y: c.cy, c: idx, kind: 'single' });
         return;
       }
-      var mk = splitComponent(L.lab, w, c, rS, singleArea, split, uniform);
+      var mk = splitComponent(L.lab, w, c, rS, singleArea, split === 'shape' ? 'shape' : 'auto', areaUniform, forced,
+        massKind === 'od' ? dens : null);
       c.n = mk.length;
       if (c.n > 1) { c.cluster = true; clusterCount++; }
       mk.forEach(function (p) { markers.push({ x: p.x, y: p.y, c: idx, kind: c.n > 1 ? 'cluster' : 'single' }); });
     });
-
-    var keep = new Int32Array(L.comps.length + 1);
-    comps.forEach(function (c, idx) { keep[c.id] = idx + 1; });
 
     // 8) Đếm theo chủng loại (tuỳ chọn).
     var types = opts.classify ? classify(rgba, L.lab, keep, comps, markers, w, opts.types || 0, !!COLOR_MODES[mode]) : null;
 
     return {
       width: w, height: h, polarity: polarity, threshold: thr,
-      singleArea: singleArea, radius: rS, minArea: minArea, uniform: uniform,
+      singleArea: singleArea, unit: unit, unitCV: unitCV, integerOk: integerOk, uniformPop: uniformPop, massKind: massKind, massEval: cands.map(function (cd) { return { name: cd.name, unit: cd.ev.unit, cv: cd.ev.cv, pop: cd.ev.pop, intOk: cd.ev.intOk, gap: cd.ev.gapFrac, scaled: cd.ev.scaledFrac, ok: cd.ev.ok }; }), radius: rS, minArea: minArea, uniform: uniform,
       comps: comps, markers: markers, clusterCount: clusterCount, hugeCount: hugeCount,
       count: markers.reduce(function (s2, mk) { return s2 + (mk.w || 1); }, 0),
       labels: L.lab, keep: keep, fgRatio: fgCount / Math.max(1, nm), ms: Date.now() - t0,

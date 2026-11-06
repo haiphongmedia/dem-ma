@@ -1,6 +1,6 @@
 /* Service worker: cho phép mở app khi mạng chập chờn.
  * Luôn lấy bản mới trên mạng trước (bỏ qua bộ nhớ đệm HTTP), mất mạng mới dùng bản đã lưu. */
-var CACHE = 'dem-truc-tiep-v5';
+var CACHE = 'dem-truc-tiep-v6';
 var SHELL = ['./', 'index.html', 'counter.js', 'worker.js', 'manifest.webmanifest'];
 
 self.addEventListener('install', function (e) {

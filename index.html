@@ -179,7 +179,7 @@
   <label class="f">Đếm từ ảnh có sẵn</label>
   <button id="btnFile" style="width:100%;padding:11px;border:1px solid #dde1e6;border-radius:10px;background:#fff;font:600 15px system-ui,sans-serif">Chọn ảnh…</button>
   <div class="hint" id="diag"></div>
-  <div class="hint" style="text-align:center;margin-top:16px">Phiên bản: đếm trực tiếp v5 (06/11/2026)</div>
+  <div class="hint" style="text-align:center;margin-top:16px">Phiên bản: đếm trực tiếp v6 (06/11/2026)</div>
 </div>
 
 <div id="camMsg"><div class="box">
@@ -221,6 +221,7 @@
     blue: 'Chiếu sáng từ trên. Không dùng cho vật màu xanh dương.',
     none: 'Đếm trên toàn khung hình, không tự tìm vùng nền.'
   };
+  var MK = { od: 'đếm theo độ cản sáng', area: 'đếm theo diện tích', shape: 'đếm theo hình dạng' };
   var PALETTE = ['#2ee66b', '#ff9f1c', '#3da5ff', '#ff4fd8', '#ffe14d', '#b388ff'];
   function toUI() {
     $('sBg').value = cfg.bg; $('sRegion').checked = cfg.region; $('sCls').checked = cfg.cls; $('sK').value = String(cfg.k);
@@ -239,7 +240,7 @@
     $('vSens').textContent = cfg.sens; $('vMin').textContent = cfg.minArea || 'tự động';
     lsSet('dem_live', cfg);
     toUI(); S.autoBg = null;
-    S.hist = []; S.thist = [];
+    S.hist = []; S.thist = []; S.shown = null;
     if (S.paused && S.stillSrc) countStill();
   }
   ['sBg', 'sRegion', 'sCls', 'sK', 'sSens', 'sMin', 'sSplit', 'sPol', 'sLive', 'sStill', 'sMixed', 'sHoles', 'sDots'].forEach(function (id) {
@@ -251,7 +252,7 @@
     // Tự nhận nền: dò lại định kỳ, giữa các lần dùng luôn loại nền vừa nhận để đếm nhanh.
     var bgUse = cfg.bg;
     if (cfg.bg === 'auto' && S.autoBg && (S.frameNo % 15) && !S.paused) bgUse = S.autoBg;
-    return { background: bgUse, region: cfg.region, classify: cfg.cls, types: cfg.k,
+    return { background: bgUse, region: cfg.region, prevMass: !S.paused && !!(S.lastRes && S.lastRes.uniform), classify: cfg.cls, types: cfg.k,
       sensitivity: cfg.sens, minArea: cfg.minArea, split: cfg.split,
       polarity: cfg.pol, mixedSizes: cfg.mixed, fillHoles: cfg.holes };
   }
@@ -321,9 +322,16 @@
   function median(a) { var b = a.slice().sort(function (p, q) { return p - q; }); return b[b.length >> 1]; }
 
   function showLive(res, ms) {
-    S.hist.push(res.count); if (S.hist.length > 7) S.hist.shift();
-    var shown = median(S.hist), last5 = S.hist.slice(-5);
-    var stable = last5.length >= 5 && Math.max.apply(null, last5) - Math.min.apply(null, last5) <= 1;
+    // Lọc theo thời gian: số hiển thị = giá trị xuất hiện nhiều nhất trong 9 lần đo gần nhất,
+    // và chỉ đổi khi giá trị mới thắng rõ ràng → không nhảy số khi rung tay / ánh sáng chập chờn.
+    S.hist.push(res.count); if (S.hist.length > 9) S.hist.shift();
+    var freq = {}, top = res.count, topN = 0;
+    S.hist.forEach(function (v) { freq[v] = (freq[v] || 0) + 1; });
+    Object.keys(freq).forEach(function (k) { if (freq[k] > topN || (freq[k] === topN && +k === S.shown)) { topN = freq[k]; top = +k; } });
+    if (S.shown == null || topN >= 3 || S.hist.length < 3) S.shown = top;
+    var shown = S.shown;
+    var hmin = Math.min.apply(null, S.hist), hmax = Math.max.apply(null, S.hist);
+    var stable = S.hist.length >= 6 && ((freq[shown] || 0) >= 6 || (hmax - hmin <= 1 && (freq[shown] || 0) >= 5));
     $('count').textContent = shown;
     setState(stable ? 'ok' : 'busy', (stable ? 'Ổn định' : 'Đang đo…') + (cfg.bg === 'auto' ? ' · ' + BG_SHORT[res.pad ? res.background : 'none'] : ''));
     // Số từng loại: trung vị vài lần gần nhất (chỉ khi số loại không đổi).
@@ -335,7 +343,7 @@
     S.msAvg = S.msAvg ? S.msAvg * 0.8 + ms * 0.2 : ms;
     $('diag').textContent = 'Trực tiếp: ' + res.width + '×' + res.height + ' px · ' + Math.round(S.msAvg) + ' ms/lần · ' +
       (res.pad ? 'vùng nền ' + Math.round(res.pad.coverage * 100) + '% khung' : 'toàn khung') + (res.types ? ' · ' + res.types.length + ' loại' : '') +
-      ' · cỡ vật ≈ ' + (2 * res.radius).toFixed(1) + ' px · ' + res.clusterCount + ' cụm' +
+      ' · cỡ vật ≈ ' + (2 * res.radius).toFixed(1) + ' px · ' + res.clusterCount + ' cụm · ' + MK[res.massKind || 'shape'] +
       ' · bộ đếm ' + (S.worker && S.workerOk ? 'chạy nền' : 'chạy trực tiếp');
   }
   // Hiện số theo loại: chip trong ô số đếm; khi dừng hình thêm bảng chú giải chi tiết.
@@ -401,11 +409,11 @@
       showTypes(res.types, null, true);
       $('diag').textContent = 'Dừng hình: ' + res.width + '×' + res.height + ' px · ' + Math.round(performance.now() - t0) + ' ms · ' +
         (res.pad ? 'vùng nền ' + Math.round(res.pad.coverage * 100) + '% khung' : 'toàn khung') + (res.types ? ' · ' + res.types.length + ' loại' : '') +
-        ' · cỡ vật ≈ ' + (2 * res.radius).toFixed(1) + ' px · ' + res.clusterCount + ' cụm';
+        ' · cỡ vật ≈ ' + (2 * res.radius).toFixed(1) + ' px · ' + res.clusterCount + ' cụm · ' + MK[res.massKind || 'shape'];
     }).catch(function (e) { setState('busy', 'Lỗi: ' + e.message); });
   }
   function resume() {
-    S.paused = false; S.stillSrc = null; S.hist = []; S.thist = [];
+    S.paused = false; S.stillSrc = null; S.hist = []; S.thist = []; S.shown = null; S.shown = null;
     $('legend').style.display = 'none';
     still.style.display = 'none'; video.style.visibility = 'visible';
     $('icoPause').style.display = 'block'; $('icoPlay').style.display = 'none'; $('freezeText').textContent = 'Dừng';
@@ -454,7 +462,7 @@
       }
       return video.play();
     }).then(function () {
-      keepAwake(); S.hist = []; setState('busy', 'Đang đo…'); loop();
+      keepAwake(); S.hist = []; S.shown = null; setState('busy', 'Đang đo…'); loop();
     }).catch(function (e) {
       var name = e && e.name ? e.name : 'lỗi';
       camError(name === 'NotAllowedError'
